@@ -150,6 +150,58 @@ def _dlq_tasks(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]
     return _rows_to_dicts(cur, cur.fetchall())
 
 
+def _budget_state(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Read budget config from _meta + current spend from task_events SUM.
+
+    Returns a dict with limit_tokens, window_seconds, policy, current_spend,
+    and a derived pct_used. Configured-but-zero limit means no budget; we
+    surface that explicitly so the dashboard can render the panel as
+    'not configured' instead of 0/0 NaN.
+    """
+    keys = {
+        "budget.limit_tokens": None,
+        "budget.window_seconds": None,
+        "budget.policy": None,
+    }
+    rows = conn.execute(
+        "SELECT key, value FROM _meta WHERE key IN "
+        "('budget.limit_tokens', 'budget.window_seconds', 'budget.policy')"
+    ).fetchall()
+    for k, v in rows:
+        keys[k] = v
+
+    limit_tokens = int(keys["budget.limit_tokens"]) if keys["budget.limit_tokens"] else 0
+    window_seconds = (
+        float(keys["budget.window_seconds"]) if keys["budget.window_seconds"] else None
+    )
+    policy = keys["budget.policy"]
+    configured = limit_tokens > 0
+
+    # Spend: SUM(token_count) over the (optional) rolling window.
+    if window_seconds is not None and configured:
+        cutoff = time.time() - window_seconds
+        spend = conn.execute(
+            "SELECT COALESCE(SUM(token_count), 0) FROM task_events WHERE ts > ?",
+            (cutoff,),
+        ).fetchone()[0]
+    else:
+        spend = conn.execute(
+            "SELECT COALESCE(SUM(token_count), 0) FROM task_events"
+        ).fetchone()[0]
+    spend = int(spend)
+
+    pct_used = (spend * 100.0 / limit_tokens) if configured else 0.0
+
+    return {
+        "configured": configured,
+        "limit_tokens": limit_tokens,
+        "window_seconds": window_seconds,
+        "policy": policy,
+        "current_spend": spend,
+        "pct_used": round(pct_used, 1),
+    }
+
+
 def _patches(
     conn: sqlite3.Connection,
     *,
@@ -316,6 +368,44 @@ def _layout(title: str, body: str) -> str:
   .intervene-form .hint {{ font-size: 0.78rem; color: var(--muted);
                             margin-top: 0.4rem; }}
 
+  /* Budget panel */
+  .budget-panel {{ background: var(--surface); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 0.7rem 0.85rem;
+                  display: flex; flex-wrap: wrap; gap: 1.2rem;
+                  align-items: center; }}
+  .budget-panel .label {{ font-size: 0.72rem; color: var(--muted);
+                          text-transform: uppercase; letter-spacing: 0.04em;
+                          font-weight: 600; }}
+  .budget-panel .value {{ font-weight: 700; font-size: 1.05rem;
+                          letter-spacing: -0.01em; }}
+  .budget-bar {{ flex: 1; min-width: 12rem; height: 0.45rem;
+                 background: var(--border); border-radius: 999px;
+                 overflow: hidden; position: relative; }}
+  .budget-bar-fill {{ height: 100%; background: var(--accent);
+                      transition: width 250ms ease-out; }}
+  .budget-bar-fill.bf-warn {{ background: #f59e0b; }}
+  .budget-bar-fill.bf-over {{ background: #dc2626; }}
+
+  /* Diagnose event rendering on task detail */
+  .diagnose-card {{ background: var(--surface); border: 1px solid var(--border);
+                    border-radius: 6px; padding: 0.7rem 0.85rem;
+                    margin: 0.5rem 0; }}
+  .diagnose-card .label {{ font-size: 0.72rem; color: var(--muted);
+                            text-transform: uppercase; letter-spacing: 0.04em;
+                            font-weight: 600; }}
+  .diagnose-card .hypothesis {{ font-size: 0.9rem; margin: 0.3rem 0 0.5rem;
+                                 line-height: 1.5; }}
+  .diagnose-card .confidence-bar {{ height: 0.32rem; background: var(--border);
+                                     border-radius: 999px; overflow: hidden;
+                                     max-width: 12rem; margin-top: 0.2rem; }}
+  .diagnose-card .confidence-fill {{ height: 100%; background: var(--accent); }}
+  .diagnose-card pre.patch-json {{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                                    font-size: 0.78rem; margin: 0.3rem 0 0;
+                                    padding: 0.4rem 0.5rem; background: var(--bg);
+                                    border: 1px solid var(--border); border-radius: 4px;
+                                    overflow-x: auto; white-space: pre-wrap;
+                                    word-break: break-word; }}
+
   /* Patch badge variants — share base .badge styling */
   .b-candidate   {{ background: #fef3c7; color: #92400e; }}
   .b-canonical   {{ background: #d1fae5; color: #065f46; }}
@@ -456,6 +546,100 @@ def _render_intervene_form(task_id: str) -> str:
         'trajectory; the substrate records both <code>posted_at</code> and '
         '<code>honored_at</code>.</div>'
         '</form>'
+    )
+
+
+def _render_budget(budget: dict[str, Any]) -> str:
+    """Compact one-line panel showing budget config + current spend."""
+    if not budget["configured"]:
+        return (
+            '<div class="budget-panel">'
+            '<span class="label">Budget</span>'
+            '<span class="value" style="color: var(--muted)">not configured</span>'
+            '<span class="label" style="margin-left: auto">'
+            "Set via <code>queue.set_budget(...)</code> "
+            "or <code>_meta</code> rows starting <code>budget.</code>"
+            "</span>"
+            '</div>'
+        )
+    pct = budget["pct_used"]
+    bar_cls = "bf-warn" if pct >= 80 else ""
+    if pct >= 100:
+        bar_cls = "bf-over"
+    width = min(100.0, pct)
+    window = budget["window_seconds"]
+    window_txt = (
+        f"rolling {window:g}s window" if window else "lifetime"
+    )
+    return (
+        '<div class="budget-panel">'
+        f'<div><span class="label">Spend</span> '
+        f'<span class="value">{budget["current_spend"]:,}</span></div>'
+        f'<div><span class="label">Limit</span> '
+        f'<span class="value">{budget["limit_tokens"]:,}</span></div>'
+        f'<div><span class="label">Policy</span> '
+        f'<span class="value">{budget["policy"] or "soft"}</span></div>'
+        f'<div><span class="label">{window_txt}</span></div>'
+        f'<div class="budget-bar">'
+        f'<div class="budget-bar-fill {bar_cls}" style="width: {width}%"></div>'
+        f'</div>'
+        f'<div><span class="value">{pct:.1f}%</span></div>'
+        '</div>'
+    )
+
+
+def _render_diagnose_event(event: dict[str, Any]) -> str | None:
+    """If event_kind=='diagnose', render the structured payload nicely.
+
+    Returns None for non-diagnose events (caller falls back to generic
+    row rendering). The diagnose payload shape per design lane:
+        {hypothesis: str, proposed_patch: dict|null, confidence: 0.0-1.0}
+    """
+    if event.get("event_kind") != "diagnose":
+        return None
+    payload_raw = event.get("payload_json")
+    if not payload_raw:
+        return None
+    try:
+        payload = json.loads(payload_raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    hypothesis = payload.get("hypothesis", "")
+    confidence = payload.get("confidence")
+    patch = payload.get("proposed_patch")
+    agent_id = event.get("agent_id", "—")
+
+    conf_html = ""
+    if isinstance(confidence, int | float):
+        pct = max(0.0, min(1.0, float(confidence))) * 100
+        conf_html = (
+            f'<div><span class="label">Confidence</span> '
+            f'<span class="value">{pct:.0f}%</span></div>'
+            f'<div class="confidence-bar">'
+            f'<div class="confidence-fill" style="width: {pct}%"></div>'
+            f'</div>'
+        )
+
+    patch_html = ""
+    if patch is not None:
+        try:
+            patch_json = json.dumps(patch, indent=2)
+        except (TypeError, ValueError):
+            patch_json = str(patch)
+        patch_html = (
+            '<div><span class="label">Proposed patch</span></div>'
+            f'<pre class="patch-json">{patch_json}</pre>'
+        )
+
+    return (
+        '<div class="diagnose-card">'
+        f'<div><span class="label">Diagnose</span> '
+        f'<span style="font-size: 0.78rem; color: var(--muted);"> by {agent_id}</span></div>'
+        f'<div class="hypothesis">{hypothesis}</div>'
+        f'{conf_html}'
+        f'{patch_html}'
+        '</div>'
     )
 
 
@@ -601,6 +785,7 @@ def create_app(db_path: str | Path) -> FastAPI:
     def html_dashboard() -> str:
         with _conn(db_path) as conn:
             depth = _queue_depth(conn)
+            budget = _budget_state(conn)
             tasks = _recent_tasks(conn, limit=15)
             events = _events_since(conn, since_id=0, limit=20)
         # Reverse events so newest-on-top in the dashboard
@@ -609,6 +794,9 @@ def create_app(db_path: str | Path) -> FastAPI:
             "<h2>Queue depth</h2>"
             f'<div hx-get="/_partial/depth" hx-trigger="every 2s" '
             f'hx-swap="innerHTML">{_render_depth(depth)}</div>'
+            "<h2>Token budget</h2>"
+            f'<div hx-get="/_partial/budget" hx-trigger="every 2s" '
+            f'hx-swap="innerHTML">{_render_budget(budget)}</div>'
             "<h2>Recent tasks</h2>"
             f"{_render_recent_tasks(tasks)}"
             "<h2>Recent events</h2>"
@@ -621,6 +809,16 @@ def create_app(db_path: str | Path) -> FastAPI:
     def html_partial_depth() -> str:
         with _conn(db_path) as conn:
             return _render_depth(_queue_depth(conn))
+
+    @app.get("/_partial/budget", response_class=HTMLResponse)
+    def html_partial_budget() -> str:
+        with _conn(db_path) as conn:
+            return _render_budget(_budget_state(conn))
+
+    @app.get("/api/budget")
+    def api_budget() -> dict[str, Any]:
+        with _conn(db_path) as conn:
+            return _budget_state(conn)
 
     @app.get("/_partial/events", response_class=HTMLResponse)
     def html_partial_events() -> str:
@@ -641,6 +839,20 @@ def create_app(db_path: str | Path) -> FastAPI:
             )
         task = data["task"]
         events_html = _render_events(data["events"])
+
+        # Surface diagnose events as rich cards (above the ledger) so
+        # the operator sees the agent's self-diagnosis immediately,
+        # not buried in the generic event row.
+        diagnose_cards = []
+        for ev in data["events"]:
+            rendered = _render_diagnose_event(ev)
+            if rendered is not None:
+                diagnose_cards.append(rendered)
+        diagnose_html = (
+            f"<h2>Self-diagnosis</h2>{''.join(diagnose_cards)}"
+            if diagnose_cards else ""
+        )
+
         interventions_html = _render_interventions(data["interventions"])
         form_html = _render_intervene_form(task["id"])
         body = (
@@ -649,6 +861,7 @@ def create_app(db_path: str | Path) -> FastAPI:
             f"&middot; <strong>Signature:</strong> <code>{task['payload_signature']}</code> "
             f"&middot; <strong>Attempts:</strong> {task['attempts']} / "
             f"{task['max_attempts']}</p>"
+            f"{diagnose_html}"
             "<h2>Event ledger</h2>"
             f"{events_html}"
             "<h2>Interventions</h2>"
