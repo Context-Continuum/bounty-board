@@ -179,32 +179,93 @@ def _layout(title: str, body: str) -> str:
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} — Bounty Board</title>
 <script src="{HTMX_CDN}"></script>
 <style>
-  body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 980px;
-         margin: 1.5rem auto; padding: 0 1rem; color: #1a1a1a; }}
-  h1 {{ font-size: 1.5rem; margin: 0 0 1rem; }}
-  h2 {{ font-size: 1.05rem; margin: 1.25rem 0 0.5rem; color: #444; }}
-  nav a {{ margin-right: 1rem; text-decoration: none; color: #2a5bd7; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 0.88rem; }}
-  th, td {{ padding: 0.35rem 0.5rem; text-align: left; border-bottom: 1px solid #eee; }}
-  th {{ font-weight: 600; color: #666; background: #fafafa; }}
-  .badge {{ display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px;
-           font-size: 0.75rem; font-weight: 600; }}
-  .b-queued    {{ background: #eef; color: #225; }}
-  .b-claimed   {{ background: #ffe9b3; color: #6b4500; }}
-  .b-processing{{ background: #b3e5ff; color: #003b66; }}
-  .b-done      {{ background: #c7f0c7; color: #145214; }}
-  .b-failed    {{ background: #ffd0d0; color: #6b0000; }}
-  .b-unclaimable {{ background: #ddd; color: #444; }}
-  .depth-row {{ display: flex; gap: 0.8rem; flex-wrap: wrap; font-size: 0.9rem; }}
-  .depth-row .cell {{ background: #fafafa; padding: 0.5rem 0.8rem; border-radius: 4px;
-                      border: 1px solid #eee; }}
-  .depth-row .n {{ font-weight: 600; font-size: 1.05rem; margin-left: 0.4rem; }}
-  code {{ font-size: 0.82rem; background: #f4f4f4; padding: 0.05rem 0.3rem;
-         border-radius: 2px; }}
-  .empty {{ color: #888; font-style: italic; padding: 0.5rem 0; }}
+  :root {{
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #2a5bd7;
+    --surface: #f9fafb;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem; color: var(--fg);
+         background: var(--bg); line-height: 1.45; }}
+  h1 {{ font-size: 1.5rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; }}
+  h2 {{ font-size: 1rem; margin: 1.5rem 0 0.5rem; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }}
+  nav {{ margin-bottom: 1rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--border); }}
+  nav a {{ margin-right: 1.2rem; text-decoration: none; color: var(--accent);
+          font-weight: 500; }}
+  nav a:hover {{ text-decoration: underline; }}
+
+  /* Tables: responsive horizontal scroll on narrow screens */
+  .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.88rem; min-width: 540px; }}
+  th, td {{ padding: 0.45rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border);
+            vertical-align: middle; }}
+  th {{ font-weight: 600; color: var(--muted); background: var(--surface);
+        font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }}
+  tbody tr:hover {{ background: var(--surface); }}
+
+  /* Status badges */
+  .badge {{ display: inline-block; padding: 0.12rem 0.5rem; border-radius: 999px;
+           font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+           letter-spacing: 0.04em; }}
+  .b-queued      {{ background: #eef2ff; color: #4338ca; }}
+  .b-claimed     {{ background: #fef3c7; color: #92400e; }}
+  .b-processing  {{ background: #dbeafe; color: #1e40af; }}
+  .b-done        {{ background: #d1fae5; color: #065f46; }}
+  .b-failed      {{ background: #fee2e2; color: #991b1b; }}
+  .b-unclaimable {{ background: #e5e7eb; color: #4b5563; }}
+
+  /* Queue-depth row: responsive flex */
+  .depth-row {{ display: flex; gap: 0.6rem; flex-wrap: wrap; }}
+  .depth-row .cell {{ background: var(--surface); padding: 0.55rem 0.85rem;
+                      border-radius: 6px; border: 1px solid var(--border);
+                      font-size: 0.82rem; color: var(--muted);
+                      min-width: 6rem; flex: 0 0 auto;
+                      text-transform: uppercase; letter-spacing: 0.04em;
+                      font-weight: 600; }}
+  .depth-row .n {{ display: block; color: var(--fg); font-weight: 700;
+                   font-size: 1.4rem; letter-spacing: -0.02em;
+                   text-transform: none; margin-top: 0.1rem; }}
+
+  /* Inline code */
+  code {{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+         font-size: 0.82rem; background: var(--surface); padding: 0.08rem 0.35rem;
+         border-radius: 3px; color: #374151; }}
+
+  /* Empty-state */
+  .empty {{ color: var(--muted); padding: 0.8rem 1rem; background: var(--surface);
+           border: 1px dashed var(--border); border-radius: 6px;
+           font-size: 0.88rem; }}
+  .empty strong {{ color: var(--fg); }}
+
+  /* Anchors inside tables */
+  a {{ color: var(--accent); text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+
+  /* HTMX swap animation — fade-in fresh content */
+  @keyframes htmx-swap-fade {{
+    from {{ opacity: 0.45; }}
+    to   {{ opacity: 1.0; }}
+  }}
+  [hx-swap-oob], .htmx-settling, .htmx-swapping ~ * {{
+    animation: htmx-swap-fade 220ms ease-out;
+  }}
+
+  /* Narrow viewport tweaks */
+  @media (max-width: 640px) {{
+    body {{ margin: 1rem auto; padding: 0 0.7rem; }}
+    h1 {{ font-size: 1.25rem; }}
+    .depth-row .cell {{ min-width: 5rem; font-size: 0.75rem; padding: 0.45rem 0.6rem; }}
+    .depth-row .n {{ font-size: 1.15rem; }}
+  }}
 </style>
 </head>
 <body>
@@ -229,9 +290,14 @@ def _render_depth(depth: dict[str, int]) -> str:
 
 def _render_recent_tasks(tasks: list[dict[str, Any]]) -> str:
     if not tasks:
-        return '<p class="empty">No tasks yet — the queue is empty.</p>'
+        return (
+            '<div class="empty"><strong>No tasks yet.</strong> Post one with '
+            '<code>Queue(&quot;…&quot;).post(...)</code>, or run '
+            '<code>python -m bounty_board.demo --db demo.bounty.db</code> to seed '
+            'a realistic demo queue.</div>'
+        )
     rows = "".join(
-        f"<tr><td><a href='/tasks/{t['id']}'><code>{t['id']}</code></a></td>"
+        f"<tr><td><a href='/tasks/{t['id']}'><code>{t['id'][:12]}</code></a></td>"
         f"<td><code>{t['task_type']}</code></td>"
         f"<td><code>{t['payload_signature']}</code></td>"
         f"<td>{_badge(t['status'])}</td>"
@@ -240,27 +306,33 @@ def _render_recent_tasks(tasks: list[dict[str, Any]]) -> str:
         for t in tasks
     )
     return (
+        '<div class="table-wrap">'
         "<table><thead><tr><th>id</th><th>type</th><th>signature</th>"
         "<th>status</th><th>attempts</th><th>claimed_by</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table>"
+        f"<tbody>{rows}</tbody></table></div>"
     )
 
 
 def _render_events(events: list[dict[str, Any]]) -> str:
     if not events:
-        return '<p class="empty">No events yet.</p>'
+        return (
+            '<div class="empty"><strong>No events yet.</strong> Events will '
+            'stream in here as agents claim, complete, fail, or decline tasks. '
+            'Refreshes every 2 seconds.</div>'
+        )
     rows = "".join(
         f"<tr><td>{e['id']}</td>"
-        f"<td><a href='/tasks/{e['task_id']}'><code>{e['task_id']}</code></a></td>"
+        f"<td><a href='/tasks/{e['task_id']}'><code>{e['task_id'][:12]}</code></a></td>"
         f"<td><code>{e['event_kind']}</code></td>"
         f"<td>{e['agent_id'] or '—'}</td>"
         f"<td>{e['token_count']}</td></tr>"
         for e in events
     )
     return (
+        '<div class="table-wrap">'
         "<table><thead><tr><th>event id</th><th>task</th><th>kind</th>"
         "<th>agent</th><th>tokens</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table>"
+        f"<tbody>{rows}</tbody></table></div>"
     )
 
 
@@ -388,24 +460,35 @@ def create_app(db_path: str | Path) -> FastAPI:
         if data is None:
             return _layout(
                 "Task not found",
-                f"<p class='empty'>Task <code>{task_id}</code> not found.</p>",
+                f'<div class="empty"><strong>Task <code>{task_id}</code> '
+                f"not found.</strong> It may have been vacuumed, or the id "
+                f"may be a typo.</div>",
             )
         task = data["task"]
         events_html = _render_events(data["events"])
         interventions = data["interventions"]
         if interventions:
             irows = "".join(
-                f"<tr><td>{i['kind']}</td><td>{i['posted_by_agent_id']}</td>"
-                f"<td>{'honored' if i['honored_at'] else 'pending'}</td></tr>"
+                f"<tr><td><code>{i['kind']}</code></td>"
+                f"<td>{i['posted_by_agent_id']}</td>"
+                f"<td>{_badge('done') if i['honored_at'] else _badge('queued')}"
+                f"{' honored' if i['honored_at'] else ' pending'}</td></tr>"
                 for i in interventions
             )
             interventions_html = (
+                '<div class="table-wrap">'
                 "<table><thead><tr><th>kind</th><th>posted by</th>"
                 "<th>state</th></tr></thead>"
-                f"<tbody>{irows}</tbody></table>"
+                f"<tbody>{irows}</tbody></table></div>"
             )
         else:
-            interventions_html = '<p class="empty">No interventions posted.</p>'
+            interventions_html = (
+                '<div class="empty"><strong>No interventions posted.</strong> '
+                "Supervising agents (or operators) can post intervention rows "
+                "for this task via <code>POST /api/interventions</code>; the "
+                "working agent voluntarily honors them at tool-call safe "
+                "boundaries.</div>"
+            )
         body = (
             f"<h2>Task <code>{task['id']}</code> {_badge(task['status'])}</h2>"
             f"<p><strong>Type:</strong> <code>{task['task_type']}</code> "
@@ -424,10 +507,18 @@ def create_app(db_path: str | Path) -> FastAPI:
         with _conn(db_path) as conn:
             tasks = _dlq_tasks(conn, limit=50)
         if not tasks:
-            body = '<p class="empty">DLQ is empty.</p>'
+            body = (
+                '<div class="empty"><strong>DLQ is empty.</strong> No tasks '
+                "have failed beyond their <code>max_attempts</code> or been "
+                "marked <code>unclaimable</code> yet. When they do, full "
+                "forensic state (stack trace, prompt payload at failure, "
+                "token count) lands in <code>task_events</code> and surfaces "
+                "here — click through to a row to see the time-travel ledger."
+                "</div>"
+            )
         else:
             rows = "".join(
-                f"<tr><td><a href='/tasks/{t['id']}'><code>{t['id']}</code></a></td>"
+                f"<tr><td><a href='/tasks/{t['id']}'><code>{t['id'][:12]}</code></a></td>"
                 f"<td><code>{t['task_type']}</code></td>"
                 f"<td>{_badge(t['status'])}</td>"
                 f"<td>{t['attempts']}</td>"
@@ -435,10 +526,11 @@ def create_app(db_path: str | Path) -> FastAPI:
                 for t in tasks
             )
             body = (
+                '<div class="table-wrap">'
                 "<table><thead><tr><th>id</th><th>type</th>"
                 "<th>status</th><th>attempts</th><th>last claimer</th>"
                 "</tr></thead>"
-                f"<tbody>{rows}</tbody></table>"
+                f"<tbody>{rows}</tbody></table></div>"
             )
         return _layout("DLQ", body)
 
