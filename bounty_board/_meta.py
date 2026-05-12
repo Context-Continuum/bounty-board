@@ -22,10 +22,12 @@ import sqlite3
 from pathlib import Path
 
 # Bumped each time a migration is added to ``bounty_board/migrations/``.
-# V0 ships with NO migrations — the initial schema (``0001_initial.sql``)
-# lands in a follow-up PR once the operator ratifies the
-# declared-vs-earned capability decision on the cluster scratchpad.
-SCHEMA_VERSION_EXPECTED = 0
+# V1 ships with the earned-capability schema (``0001_initial.sql``). The
+# declared-vs-earned decision landed via implicit ratification of the
+# supervisor-as-capability principle — supervisors must EARN the
+# supervisor capability via successful interventions; declared-tags
+# would collapse the substrate-honest ethos.
+SCHEMA_VERSION_EXPECTED = 1
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
