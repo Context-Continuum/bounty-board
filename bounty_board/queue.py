@@ -456,3 +456,13 @@ class Queue:
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def dlq(self):
+        """Return the DLQ surface bound to this queue. See
+        ``bounty_board.dlq.DLQ`` for the list / get / replay /
+        purge_older_than / depth methods.
+
+        Untyped signature to avoid a circular-import dance — dlq.py
+        imports Queue under TYPE_CHECKING for its own annotations."""
+        from bounty_board.dlq import DLQ
+        return DLQ(self)
