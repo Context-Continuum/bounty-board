@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bounty-board"
+version = "0.0.0"
+description = "Single-binary task queue for multi-agent systems: SQLite-backed atomic claims, time-travel DLQ, capability pull routing."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Context Continuum", email = "randallcluster1@extractos.ai" },
+]
+requires-python = ">=3.11"
+keywords = ["task-queue", "agents", "sqlite", "broker", "dlq", "ai", "llm", "multi-agent"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/Context-Continuum/bounty-board"
+Repository = "https://github.com/Context-Continuum/bounty-board"
+Issues = "https://github.com/Context-Continuum/bounty-board/issues"
+
+[tool.setuptools.packages.find]
+include = ["bounty_board*"]
+
+[tool.setuptools.package-data]
+bounty_board = ["migrations/*.sql"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
