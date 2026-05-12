@@ -536,3 +536,80 @@ def test_intervene_form_post_400_on_bad_kind(client):
         data={"kind": "explode_the_universe", "posted_by_agent_id": "x"},
     )
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# DLQ replay — API + HTML partial
+# ---------------------------------------------------------------------------
+
+
+def test_dlq_replay_api_creates_fresh_task(client):
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-fail", status="failed", attempts=3,
+               completed_at=time.time())
+    conn.close()
+
+    r = client.post("/api/dlq/replay/t-fail")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["replayed_from"] == "t-fail"
+    new_id = body["new_task_id"]
+    assert new_id != "t-fail"
+
+    conn = open_db(client.db_path)
+    orig_status = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", ("t-fail",)
+    ).fetchone()[0]
+    new_row = conn.execute(
+        "SELECT status, parent_id FROM tasks WHERE id = ?", (new_id,)
+    ).fetchone()
+    conn.close()
+    assert orig_status == "failed"
+    assert new_row == ("queued", "t-fail")
+
+
+def test_dlq_replay_api_404_when_task_missing(client):
+    r = client.post("/api/dlq/replay/ghost")
+    assert r.status_code == 404
+
+
+def test_dlq_replay_api_400_when_task_not_in_dlq(client):
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-done", status="done")
+    conn.close()
+
+    r = client.post("/api/dlq/replay/t-done")
+    assert r.status_code == 400
+
+
+def test_dlq_html_renders_replay_button_per_row(client):
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-render", status="failed", attempts=3,
+               completed_at=time.time())
+    conn.close()
+
+    r = client.get("/dlq")
+    body = r.text
+    assert "Replay" in body
+    assert "/_partial/dlq/replay/t-render" in body
+    assert "replay-btn" in body
+    assert "id='dlq-row-t-render'" in body
+
+
+def test_dlq_partial_replay_returns_replacement_row(client):
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-swap", status="failed", attempts=3,
+               completed_at=time.time())
+    conn.close()
+
+    r = client.post("/_partial/dlq/replay/t-swap")
+    assert r.status_code == 200
+    body = r.text
+    assert "<!doctype html>" not in body.lower()
+    assert "id='dlq-row-t-swap'" in body
+    assert "Replayed" in body or "replayed" in body
+
+
+def test_dlq_partial_replay_404_when_missing(client):
+    r = client.post("/_partial/dlq/replay/ghost")
+    assert r.status_code == 404

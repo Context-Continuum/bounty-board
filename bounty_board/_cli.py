@@ -377,6 +377,150 @@ def _cmd_decline(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# dlq list / get / replay / purge
+# ---------------------------------------------------------------------------
+
+
+def _dlq_entry_to_dict(entry) -> dict:
+    """Serialize a DLQEntry dataclass into JSON-safe dict form."""
+    return {
+        "task_id": entry.task_id,
+        "task_type": entry.task_type,
+        "payload_signature": entry.payload_signature,
+        "payload": entry.payload,
+        "status": entry.status,
+        "attempts": entry.attempts,
+        "max_attempts": entry.max_attempts,
+        "created_at": entry.created_at,
+        "completed_at": entry.completed_at,
+        "parent_id": entry.parent_id,
+        "total_token_count": entry.total_token_count,
+        "trajectory": [
+            {
+                "id": ev.id,
+                "event_kind": ev.event_kind,
+                "ts": ev.ts,
+                "agent_id": ev.agent_id,
+                "payload": ev.payload,
+                "token_count": ev.token_count,
+            }
+            for ev in entry.trajectory
+        ],
+    }
+
+
+def _cmd_dlq_list(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[bounty-board] {db_path} does not exist.", file=sys.stderr)
+        return 1
+
+    q = Queue(db_path)
+    try:
+        from bounty_board.dlq import DLQ
+
+        entries = DLQ(q).list(
+            limit=args.limit,
+            payload_signature=args.signature,
+        )
+    finally:
+        q.close()
+
+    if args.json:
+        json.dump([_dlq_entry_to_dict(e) for e in entries], sys.stdout)
+        sys.stdout.write("\n")
+        return 0
+
+    if not entries:
+        print("(DLQ is empty)")
+        return 0
+    for e in entries:
+        print(
+            f"{e.task_id[:12]}  status={e.status:11s}  "
+            f"type={e.task_type:20s}  sig={e.payload_signature:20s}  "
+            f"attempts={e.attempts}/{e.max_attempts}"
+        )
+    return 0
+
+
+def _cmd_dlq_get(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[bounty-board] {db_path} does not exist.", file=sys.stderr)
+        return 1
+
+    q = Queue(db_path)
+    try:
+        from bounty_board.dlq import DLQ
+
+        entry = DLQ(q).get(args.task)
+    finally:
+        q.close()
+
+    if entry is None:
+        print(
+            f"[bounty-board] task {args.task!r} not in DLQ "
+            f"(either doesn't exist or status is not failed/unclaimable).",
+            file=sys.stderr,
+        )
+        return 1
+
+    json.dump(_dlq_entry_to_dict(entry), sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _cmd_dlq_replay(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[bounty-board] {db_path} does not exist.", file=sys.stderr)
+        return 1
+
+    q = Queue(db_path)
+    try:
+        from bounty_board.dlq import DLQ
+
+        try:
+            new_id = DLQ(q).replay(args.task)
+        except ValueError as e:
+            print(f"[bounty-board] {e}", file=sys.stderr)
+            return 1
+    finally:
+        q.close()
+
+    json.dump({"replayed_from": args.task, "new_task_id": new_id}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _cmd_dlq_purge(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[bounty-board] {db_path} does not exist.", file=sys.stderr)
+        return 1
+
+    q = Queue(db_path)
+    try:
+        from bounty_board.dlq import DLQ
+
+        n_purged = DLQ(q).purge_older_than(days=args.days)
+    finally:
+        q.close()
+
+    json.dump({"purged_n": n_purged, "older_than_days": args.days}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # inspect (existing)
 # ---------------------------------------------------------------------------
 
@@ -551,6 +695,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="structured reason string (e.g. 'task_size_exceeds_budget')",
     )
     decline_p.set_defaults(func=_cmd_decline)
+
+    dlq_p = subparsers.add_parser(
+        "dlq",
+        help="DLQ surface: list / get / replay / purge failed tasks.",
+    )
+    dlq_sub = dlq_p.add_subparsers(dest="dlq_verb", required=True)
+
+    dlq_list_p = dlq_sub.add_parser(
+        "list", help="List DLQ entries (most-recently-failed first).",
+    )
+    dlq_list_p.add_argument("db_path", help="path to the queue .db file")
+    dlq_list_p.add_argument(
+        "--signature", help="filter by payload_signature",
+    )
+    dlq_list_p.add_argument(
+        "--limit", type=int, default=50,
+        help="max entries to return (default 50)",
+    )
+    dlq_list_p.add_argument(
+        "--json", action="store_true",
+        help="emit JSON array of full forensic dossiers",
+    )
+    dlq_list_p.set_defaults(func=_cmd_dlq_list)
+
+    dlq_get_p = dlq_sub.add_parser(
+        "get", help="Full forensic dossier for one DLQ entry (JSON).",
+    )
+    dlq_get_p.add_argument("db_path", help="path to the queue .db file")
+    dlq_get_p.add_argument("--task", required=True, help="task_id")
+    dlq_get_p.set_defaults(func=_cmd_dlq_get)
+
+    dlq_replay_p = dlq_sub.add_parser(
+        "replay",
+        help="Re-queue a failed task as a FRESH task (provenance-chain "
+        "via parent_id; original stays in 'failed' for audit).",
+    )
+    dlq_replay_p.add_argument("db_path", help="path to the queue .db file")
+    dlq_replay_p.add_argument("--task", required=True, help="task_id to replay")
+    dlq_replay_p.set_defaults(func=_cmd_dlq_replay)
+
+    dlq_purge_p = dlq_sub.add_parser(
+        "purge",
+        help="Delete DLQ entries older than N days (cascades to "
+        "task_events for the purged tasks).",
+    )
+    dlq_purge_p.add_argument("db_path", help="path to the queue .db file")
+    dlq_purge_p.add_argument(
+        "--days", type=float, required=True,
+        help="purge entries older than this many days",
+    )
+    dlq_purge_p.set_defaults(func=_cmd_dlq_purge)
 
     inspect_p = subparsers.add_parser(
         "inspect",
