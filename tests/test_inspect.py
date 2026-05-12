@@ -12,9 +12,24 @@ tests fixture sets up, and the dashboard will render identically.
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import pytest
+
+# /inspect uses PEP 604 union syntax (`str | None`) in FastAPI route
+# signatures; pydantic/FastAPI evaluate those at runtime. On Python
+# <3.10 the runtime eval raises TypeError at collection time, surfacing
+# as a wall of confusing pytest errors. pyproject.toml pins
+# requires-python = >=3.11, but give contributors on older Pythons a
+# clean single-line skip with a clear message rather than the wall.
+if sys.version_info < (3, 10):  # noqa: UP036 — defensive against contributors on older Python
+    pytest.skip(
+        "bounty_board.inspect requires Python 3.10+ for PEP 604 union "
+        "syntax (`str | None`) used in FastAPI route signatures. "
+        "pyproject.toml requires-python = '>=3.11'.",
+        allow_module_level=True,
+    )
 
 # fastapi is an optional dependency; skip cleanly when not installed.
 fastapi = pytest.importorskip("fastapi")
