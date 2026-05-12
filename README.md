@@ -244,6 +244,15 @@ CI: GitHub Actions runs the suite on Linux / macOS / Windows × Python 3.11 / 3.
 
 ---
 
+## Deeper docs
+
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — design choices,
+  atomic claim path, earned-capability model, the six elegance
+  features mapped to their substrate rows
+- [docs/SCHEMA.md](./docs/SCHEMA.md) — the public-contract reference
+  for the SQLite schema (5 tables, 7 indices, canonical event kinds,
+  read-only adapter recipes for Go / Rust / Bash)
+
 ## Design lane
 
 The full design discussion (six elegance features, capability model
