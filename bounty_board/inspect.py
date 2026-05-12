@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from bounty_board._meta import open_db
@@ -259,6 +259,32 @@ def _layout(title: str, body: str) -> str:
     animation: htmx-swap-fade 220ms ease-out;
   }}
 
+  /* Intervene form on task-detail */
+  .intervene-form {{ background: var(--surface); border: 1px solid var(--border);
+                     border-radius: 6px; padding: 0.7rem 0.85rem;
+                     margin-top: 0.6rem; }}
+  .intervene-form label {{ display: inline-block; font-size: 0.78rem;
+                            color: var(--muted); margin-right: 0.4rem;
+                            text-transform: uppercase; letter-spacing: 0.04em;
+                            font-weight: 600; }}
+  .intervene-form select, .intervene-form input[type=text] {{
+    font-family: inherit; font-size: 0.85rem; padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--fg); margin-right: 0.5rem;
+  }}
+  .intervene-form input[type=text] {{ min-width: 16rem; }}
+  .intervene-form button {{ font-family: inherit; font-size: 0.85rem;
+    padding: 0.32rem 0.85rem; border: 1px solid var(--accent);
+    background: var(--accent); color: white; border-radius: 4px;
+    cursor: pointer; font-weight: 500;
+  }}
+  .intervene-form button:hover {{ filter: brightness(0.92); }}
+  .intervene-form .row {{ display: flex; flex-wrap: wrap; gap: 0.4rem;
+                          align-items: center; margin-bottom: 0.4rem; }}
+  .intervene-form .row:last-child {{ margin-bottom: 0; }}
+  .intervene-form .hint {{ font-size: 0.78rem; color: var(--muted);
+                            margin-top: 0.4rem; }}
+
   /* Narrow viewport tweaks */
   @media (max-width: 640px) {{
     body {{ margin: 1rem auto; padding: 0 0.7rem; }}
@@ -310,6 +336,74 @@ def _render_recent_tasks(tasks: list[dict[str, Any]]) -> str:
         "<table><thead><tr><th>id</th><th>type</th><th>signature</th>"
         "<th>status</th><th>attempts</th><th>claimed_by</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div>"
+    )
+
+
+INTERVENTION_KINDS = ("inject_hint", "swap_model", "pause", "cancel")
+
+
+def _render_interventions(interventions: list[dict[str, Any]]) -> str:
+    """Render the interventions table (a partial — no layout chrome).
+
+    Returned as the HTMX swap target on form submit. Empty state has
+    its own helpful copy.
+    """
+    if not interventions:
+        return (
+            '<div class="empty"><strong>No interventions posted.</strong> '
+            "Supervising agents (or operators) can post intervention rows "
+            "for this task; the working agent voluntarily honors them at "
+            "tool-call safe boundaries.</div>"
+        )
+    irows = "".join(
+        f"<tr><td><code>{i['kind']}</code></td>"
+        f"<td>{i['posted_by_agent_id']}</td>"
+        f"<td>{_badge('done') if i['honored_at'] else _badge('queued')}"
+        f"{' honored' if i['honored_at'] else ' pending'}</td></tr>"
+        for i in interventions
+    )
+    return (
+        '<div class="table-wrap">'
+        "<table><thead><tr><th>kind</th><th>posted by</th>"
+        "<th>state</th></tr></thead>"
+        f"<tbody>{irows}</tbody></table></div>"
+    )
+
+
+def _render_intervene_form(task_id: str) -> str:
+    """Render the form that posts an intervention for ``task_id``.
+
+    Uses ``hx-post`` so submission swaps the interventions list in
+    place instead of full-page-reloading. The ``hint`` field is only
+    meaningful when ``kind == 'inject_hint'`` but is unconditionally
+    sent — the API tolerates extra context.
+    """
+    options = "".join(
+        f'<option value="{k}">{k}</option>' for k in INTERVENTION_KINDS
+    )
+    return (
+        f'<form class="intervene-form" '
+        f'hx-post="/_partial/task/{task_id}/interventions" '
+        f'hx-target="#interventions-list" hx-swap="innerHTML" '
+        f'hx-on::after-request="if(event.detail.successful) this.reset()">'
+        '<div class="row">'
+        '<label for="iv-kind">Kind</label>'
+        f'<select id="iv-kind" name="kind" required>{options}</select>'
+        '<label for="iv-agent">Posted by</label>'
+        '<input id="iv-agent" type="text" name="posted_by_agent_id" '
+        'placeholder="supervisor_agent" required>'
+        '</div>'
+        '<div class="row">'
+        '<label for="iv-hint">Hint (for inject_hint)</label>'
+        '<input id="iv-hint" type="text" name="hint" '
+        'placeholder="check edge case X" style="flex:1;min-width:18rem">'
+        '<button type="submit">Post intervention</button>'
+        '</div>'
+        '<div class="hint">Working agent honors voluntarily at the next '
+        'tool-call safe boundary. Voluntary-honor preserves the forensic '
+        'trajectory; the substrate records both <code>posted_at</code> and '
+        '<code>honored_at</code>.</div>'
+        '</form>'
     )
 
 
@@ -466,29 +560,8 @@ def create_app(db_path: str | Path) -> FastAPI:
             )
         task = data["task"]
         events_html = _render_events(data["events"])
-        interventions = data["interventions"]
-        if interventions:
-            irows = "".join(
-                f"<tr><td><code>{i['kind']}</code></td>"
-                f"<td>{i['posted_by_agent_id']}</td>"
-                f"<td>{_badge('done') if i['honored_at'] else _badge('queued')}"
-                f"{' honored' if i['honored_at'] else ' pending'}</td></tr>"
-                for i in interventions
-            )
-            interventions_html = (
-                '<div class="table-wrap">'
-                "<table><thead><tr><th>kind</th><th>posted by</th>"
-                "<th>state</th></tr></thead>"
-                f"<tbody>{irows}</tbody></table></div>"
-            )
-        else:
-            interventions_html = (
-                '<div class="empty"><strong>No interventions posted.</strong> '
-                "Supervising agents (or operators) can post intervention rows "
-                "for this task via <code>POST /api/interventions</code>; the "
-                "working agent voluntarily honors them at tool-call safe "
-                "boundaries.</div>"
-            )
+        interventions_html = _render_interventions(data["interventions"])
+        form_html = _render_intervene_form(task["id"])
         body = (
             f"<h2>Task <code>{task['id']}</code> {_badge(task['status'])}</h2>"
             f"<p><strong>Type:</strong> <code>{task['task_type']}</code> "
@@ -498,9 +571,57 @@ def create_app(db_path: str | Path) -> FastAPI:
             "<h2>Event ledger</h2>"
             f"{events_html}"
             "<h2>Interventions</h2>"
-            f"{interventions_html}"
+            f'<div id="interventions-list">{interventions_html}</div>'
+            f"{form_html}"
         )
         return _layout(f"Task {task_id}", body)
+
+    @app.post("/_partial/task/{task_id}/interventions", response_class=HTMLResponse)
+    def html_partial_post_intervention(
+        task_id: str,
+        kind: str = Form(...),
+        posted_by_agent_id: str = Form(...),
+        hint: str | None = Form(None),
+    ) -> str:
+        """Form-encoded intervention POST that returns the refreshed
+        interventions table fragment. Used by the inline form on the
+        task-detail page via HTMX.
+
+        If ``kind == 'inject_hint'`` and a ``hint`` is provided, we
+        wrap it as ``payload_json={"hint": "..."}`` for the substrate
+        row. Otherwise ``payload_json`` is null.
+        """
+        if kind not in INTERVENTION_KINDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"kind must be one of {INTERVENTION_KINDS}",
+            )
+        with _conn(db_path) as conn:
+            task = conn.execute(
+                "SELECT id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+            payload_json: str | None = None
+            if kind == "inject_hint" and hint:
+                import json as _json
+                payload_json = _json.dumps({"hint": hint})
+
+            _post_intervention(
+                conn,
+                task_id=task_id,
+                kind=kind,
+                payload_json=payload_json,
+                posted_by_agent_id=posted_by_agent_id,
+            )
+            cur = conn.execute(
+                "SELECT id, kind, payload_json, posted_by_agent_id, posted_at, honored_at "
+                "FROM interventions WHERE task_id = ? ORDER BY posted_at ASC",
+                (task_id,),
+            )
+            interventions = _rows_to_dicts(cur, cur.fetchall())
+        return _render_interventions(interventions)
 
     @app.get("/dlq", response_class=HTMLResponse)
     def html_dlq() -> str:

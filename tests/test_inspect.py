@@ -408,15 +408,16 @@ def test_dlq_empty_state_explains_the_dlq(client):
 
 def test_task_detail_empty_interventions_explains_the_substrate(client):
     """Task detail with no interventions explains what interventions
-    are + how to post one — not just 'No interventions posted.'"""
+    are + makes posting one one-click via the inline form."""
     conn = open_db(client.db_path)
     _seed_task(conn, "t-detail-no-iv")
     conn.close()
     r = client.get("/tasks/t-detail-no-iv")
     body = r.text
     assert "No interventions posted" in body
-    # Pointer to the API surface for posting one
-    assert "/api/interventions" in body or "POST" in body
+    # The intervene form IS the API surface — no prose pointer needed
+    assert "Post intervention" in body
+    assert 'class="intervene-form"' in body
 
 
 def test_404_task_detail_renders_layout(client):
@@ -429,3 +430,109 @@ def test_404_task_detail_renders_layout(client):
     assert "not found" in body
     # Layout chrome present
     assert "<!doctype html>" in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# Intervene UI — form on task-detail + HTMX partial-swap
+# ---------------------------------------------------------------------------
+
+
+def test_task_detail_renders_intervene_form(client):
+    """Task detail page includes the intervene form below interventions list."""
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-iv-form")
+    conn.close()
+    r = client.get("/tasks/t-iv-form")
+    body = r.text
+    assert 'class="intervene-form"' in body
+    # HTMX target wires up to the partial endpoint
+    assert "/_partial/task/t-iv-form/interventions" in body
+    # All four kinds are option-able
+    for kind in ("inject_hint", "swap_model", "pause", "cancel"):
+        assert f'value="{kind}"' in body
+
+
+def test_intervene_form_post_writes_row_and_returns_partial(client):
+    """Form-encoded POST writes an interventions row + returns the
+    refreshed table fragment (no layout chrome)."""
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-iv-post")
+    conn.close()
+
+    r = client.post(
+        "/_partial/task/t-iv-post/interventions",
+        data={
+            "kind": "inject_hint",
+            "posted_by_agent_id": "supervisor_42",
+            "hint": "check the null-coalesce edge case",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.text
+    # Fragment, NOT a full page
+    assert "<!doctype html>" not in body.lower()
+    # The new intervention shows up
+    assert "supervisor_42" in body
+    assert "inject_hint" in body
+
+    # Substrate row landed with the wrapped payload
+    conn = open_db(client.db_path)
+    row = conn.execute(
+        "SELECT kind, payload_json, posted_by_agent_id FROM interventions "
+        "WHERE task_id = ? ORDER BY posted_at DESC LIMIT 1",
+        ("t-iv-post",),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "inject_hint"
+    assert "null-coalesce" in row[1]
+    assert row[2] == "supervisor_42"
+
+
+def test_intervene_form_post_non_hint_kind_payload_is_null(client):
+    """For kinds other than inject_hint, payload_json should be null
+    even if a hint string accidentally accompanies the form."""
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-iv-cancel")
+    conn.close()
+
+    r = client.post(
+        "/_partial/task/t-iv-cancel/interventions",
+        data={
+            "kind": "cancel",
+            "posted_by_agent_id": "Win/Claude",
+            "hint": "ignored for cancel",
+        },
+    )
+    assert r.status_code == 200
+
+    conn = open_db(client.db_path)
+    row = conn.execute(
+        "SELECT kind, payload_json FROM interventions "
+        "WHERE task_id = ? LIMIT 1",
+        ("t-iv-cancel",),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "cancel"
+    assert row[1] is None
+
+
+def test_intervene_form_post_404_on_missing_task(client):
+    """Posting against a nonexistent task surfaces 404, not a silent insert."""
+    r = client.post(
+        "/_partial/task/does-not-exist/interventions",
+        data={"kind": "pause", "posted_by_agent_id": "x"},
+    )
+    assert r.status_code == 404
+
+
+def test_intervene_form_post_400_on_bad_kind(client):
+    """Unknown intervention kind is rejected with a clear 400."""
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-iv-bad")
+    conn.close()
+
+    r = client.post(
+        "/_partial/task/t-iv-bad/interventions",
+        data={"kind": "explode_the_universe", "posted_by_agent_id": "x"},
+    )
+    assert r.status_code == 400
