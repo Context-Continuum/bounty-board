@@ -37,7 +37,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
 
 from bounty_board._meta import open_db
 
@@ -69,9 +68,9 @@ class Task:
     max_attempts: int
     claimed_by: str
     claimed_at: float
-    _queue: "Queue"
+    _queue: Queue
 
-    def complete(self, result: Optional[dict] = None,
+    def complete(self, result: dict | None = None,
                  token_count: int = 0) -> None:
         """Mark task done. Increments ``success_n`` on the agent's
         track record for this signature, emits a ``complete`` event."""
@@ -81,7 +80,7 @@ class Task:
             result=result, token_count=token_count,
         )
 
-    def fail(self, stack: str, prompt_state: Optional[dict] = None,
+    def fail(self, stack: str, prompt_state: dict | None = None,
              token_count: int = 0) -> None:
         """Mark task failed (forensic capture). Increments ``fail_n``
         on the agent's track record + emits a ``fail`` event carrying
@@ -140,7 +139,7 @@ class Queue:
     def close(self) -> None:
         self._conn.close()
 
-    def __enter__(self) -> "Queue":
+    def __enter__(self) -> Queue:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -149,10 +148,10 @@ class Queue:
     # ─── Post side ─────────────────────────────────────────────────
 
     def post(self, *, task_type: str, payload: dict,
-             payload_signature: Optional[str] = None,
+             payload_signature: str | None = None,
              priority: int = 0,
              max_attempts: int = 3,
-             parent_id: Optional[str] = None) -> str:
+             parent_id: str | None = None) -> str:
         """Post a new task. Returns the task id (uuid4 hex).
 
         ``payload_signature`` defaults to ``task_type`` when omitted.
@@ -177,7 +176,7 @@ class Queue:
 
     # ─── Claim side ────────────────────────────────────────────────
 
-    def claim(self, *, agent_id: str) -> Optional[Task]:
+    def claim(self, *, agent_id: str) -> Task | None:
         """Atomically claim one task matching the agent's earned
         capabilities, or the (a)+(d) bootstrap rules.
 
@@ -216,6 +215,18 @@ class Queue:
                        -- We approximate "no qualified agent has tried"
                        -- by checking created_at < stale_cutoff (i.e.
                        -- the task has been queued past the window).
+                       --
+                       -- V1-LIMIT (intentional, per Win review of PR #4):
+                       -- "agent has decline_n > 0" is a PERMANENT shadow
+                       -- on the (agent, signature) pair — a single ancient
+                       -- decline keeps the agent out of stale-open route
+                       -- on that signature forever. Substrate-correct
+                       -- ("don't re-offer") but probably too aggressive
+                       -- across weeks/months. V2 plan: time-window via
+                       -- agent_track_record.last_seen_at — "declines
+                       -- older than 24h don't count." Substrate already
+                       -- carries last_seen_at, so V2 needs no schema
+                       -- change.
                        OR (
                            created_at < ?
                            AND payload_signature NOT IN (
@@ -304,7 +315,7 @@ class Queue:
 
     def _mark_complete(self, task_id: str, *, agent_id: str,
                        payload_signature: str,
-                       result: Optional[dict], token_count: int) -> None:
+                       result: dict | None, token_count: int) -> None:
         now = time.time()
         with self._conn:
             self._conn.execute(
@@ -340,7 +351,7 @@ class Queue:
 
     def _mark_fail(self, task_id: str, *, agent_id: str,
                    payload_signature: str, stack: str,
-                   prompt_state: Optional[dict],
+                   prompt_state: dict | None,
                    token_count: int) -> None:
         now = time.time()
         # Decide post-fail status: re-queue if attempts < max, else
@@ -439,7 +450,7 @@ class Queue:
         ).fetchone()
         return row["n"]
 
-    def get_task(self, task_id: str) -> Optional[dict]:
+    def get_task(self, task_id: str) -> dict | None:
         """Return task row as dict, or None."""
         row = self._conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
