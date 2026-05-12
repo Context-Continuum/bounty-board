@@ -21,10 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from bounty_board.queue import OPEN_SIGNATURE, Queue
-
 
 # ─── Round-trip ──────────────────────────────────────────────────────
 
