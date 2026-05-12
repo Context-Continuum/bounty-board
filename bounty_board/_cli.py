@@ -2,15 +2,27 @@
 
 Subcommands:
 
-  bounty-board init   <db_path>          create an empty queue file
-  bounty-board status <db_path>          print queue depth + recent counts
-  bounty-board inspect <db_path> [...]   run the /inspect dashboard
+  bounty-board init     <db_path>                 create / migrate forward
+  bounty-board status   <db_path>                 queue depth + counts
+  bounty-board post     <db_path> --type ... [...] post a new task
+  bounty-board claim    <db_path> --agent ...     claim a task atomically
+  bounty-board complete <db_path> --task ...      mark task done
+  bounty-board fail     <db_path> --task ...      mark task failed
+  bounty-board decline  <db_path> --task ...      cooperative decline
+  bounty-board inspect  <db_path> [...]           /inspect dashboard
 
 The CLI is the shell-side surface — a user can ``pip install bounty-board``
-and immediately inspect a queue without writing any Python. Each verb maps
-to a single substrate operation: no hidden state, no daemons (other than
-the optional dashboard server), no implicit migrations beyond what
-``open_db`` already runs.
+and operate a complete task lifecycle (post → claim → complete) without
+writing any Python. Useful for cron jobs, shell pipelines, CI gates, and
+quick demos.
+
+Substrate-discipline: each verb maps to a single substrate operation that
+writes the same canonical rows the Python API would. ``bounty-board claim``
+takes the same SQLite reserved-lock as ``Queue.claim()`` and emits the same
+``task_events`` row.
+
+JSON-output is the canonical shape (--json on init/status; default on
+post/claim). Plaintext is the convenience.
 """
 from __future__ import annotations
 
@@ -138,6 +150,233 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# post / claim / complete / fail / decline (lifecycle)
+# ---------------------------------------------------------------------------
+
+
+def _load_payload(args: argparse.Namespace) -> dict:
+    """Resolve --payload (literal JSON) or --payload-stdin or {}."""
+    if args.payload_stdin:
+        raw = sys.stdin.read()
+        return json.loads(raw) if raw.strip() else {}
+    if args.payload:
+        return json.loads(args.payload)
+    return {}
+
+
+def _resolve_signature_for(conn, task_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT payload_signature FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _cmd_post(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists() and not args.create:
+        print(
+            f"[bounty-board] {db_path} does not exist. Pass --create to "
+            f"initialize on demand, or run `bounty-board init {db_path}` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    payload = _load_payload(args)
+    q = Queue(db_path)
+    try:
+        task_id = q.post(
+            task_type=args.task_type,
+            payload=payload,
+            payload_signature=args.signature,
+            priority=args.priority,
+            max_attempts=args.max_attempts,
+        )
+    finally:
+        q.close()
+
+    json.dump({"task_id": task_id}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _cmd_claim(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(
+            f"[bounty-board] {db_path} does not exist. Initialize with "
+            f"`bounty-board init {db_path}`.",
+            file=sys.stderr,
+        )
+        return 1
+
+    q = Queue(db_path)
+    try:
+        task = q.claim(agent_id=args.agent)
+    finally:
+        q.close()
+
+    if task is None:
+        if args.json:
+            json.dump({"claimed": False}, sys.stdout)
+            sys.stdout.write("\n")
+        else:
+            print(f"[bounty-board] no claimable task for agent {args.agent}.",
+                  file=sys.stderr)
+        return 1
+
+    out = {
+        "claimed": True,
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "payload_signature": task.payload_signature,
+        "payload": task.payload,
+        "priority": task.priority,
+        "attempts": task.attempts,
+        "max_attempts": task.max_attempts,
+        "claimed_by": task.claimed_by,
+        "claimed_at": task.claimed_at,
+    }
+    json.dump(out, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _cmd_complete(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[bounty-board] {db_path} does not exist.", file=sys.stderr)
+        return 1
+
+    result: dict | None = None
+    if args.result:
+        result = json.loads(args.result)
+
+    q = Queue(db_path)
+    try:
+        signature = _resolve_signature_for(q._conn, args.task)
+        if signature is None:
+            print(
+                f"[bounty-board] no task with id {args.task!r}",
+                file=sys.stderr,
+            )
+            return 1
+        q._mark_complete(
+            args.task,
+            agent_id=args.agent,
+            payload_signature=signature,
+            result=result,
+            token_count=args.tokens,
+        )
+    finally:
+        q.close()
+
+    json.dump(
+        {"task_id": args.task, "status": "done", "agent_id": args.agent},
+        sys.stdout,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+def _cmd_fail(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[bounty-board] {db_path} does not exist.", file=sys.stderr)
+        return 1
+
+    prompt_state: dict | None = None
+    if args.prompt_state:
+        prompt_state = json.loads(args.prompt_state)
+
+    stack = args.stack
+    if args.stack_stdin:
+        stack = sys.stdin.read()
+
+    q = Queue(db_path)
+    try:
+        signature = _resolve_signature_for(q._conn, args.task)
+        if signature is None:
+            print(
+                f"[bounty-board] no task with id {args.task!r}",
+                file=sys.stderr,
+            )
+            return 1
+        q._mark_fail(
+            args.task,
+            agent_id=args.agent,
+            payload_signature=signature,
+            stack=stack or "",
+            prompt_state=prompt_state,
+            token_count=args.tokens,
+        )
+        # Look up post-fail status to surface in output
+        row = q._conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (args.task,)
+        ).fetchone()
+        post_status = row[0] if row else "unknown"
+    finally:
+        q.close()
+
+    json.dump(
+        {
+            "task_id": args.task,
+            "status": post_status,
+            "agent_id": args.agent,
+        },
+        sys.stdout,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+def _cmd_decline(args: argparse.Namespace) -> int:
+    from bounty_board.queue import Queue
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[bounty-board] {db_path} does not exist.", file=sys.stderr)
+        return 1
+
+    q = Queue(db_path)
+    try:
+        signature = _resolve_signature_for(q._conn, args.task)
+        if signature is None:
+            print(
+                f"[bounty-board] no task with id {args.task!r}",
+                file=sys.stderr,
+            )
+            return 1
+        q._mark_decline(
+            args.task,
+            agent_id=args.agent,
+            payload_signature=signature,
+            reason=args.reason,
+        )
+    finally:
+        q.close()
+
+    json.dump(
+        {
+            "task_id": args.task,
+            "status": "queued",
+            "agent_id": args.agent,
+            "reason": args.reason,
+        },
+        sys.stdout,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # inspect (existing)
 # ---------------------------------------------------------------------------
 
@@ -205,6 +444,113 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit a JSON summary on stdout instead of plaintext columns",
     )
     status_p.set_defaults(func=_cmd_status)
+
+    post_p = subparsers.add_parser(
+        "post",
+        help="Post a new task to the queue.",
+    )
+    post_p.add_argument("db_path", help="path to the queue .db file")
+    post_p.add_argument(
+        "--type", dest="task_type", required=True,
+        help="task_type (categorical, e.g. 'summarize')",
+    )
+    post_p.add_argument(
+        "--signature",
+        help="payload_signature (defaults to task_type). Use 'open' for "
+        "the bootstrap sentinel that any agent can claim.",
+    )
+    post_p.add_argument(
+        "--payload", help="payload as inline JSON (e.g. --payload '{}')",
+    )
+    post_p.add_argument(
+        "--payload-stdin", action="store_true",
+        help="read payload JSON from stdin",
+    )
+    post_p.add_argument(
+        "--priority", type=int, default=0,
+        help="priority (higher = claimed sooner; default 0)",
+    )
+    post_p.add_argument(
+        "--max-attempts", type=int, default=3,
+        help="max claim attempts before parking in 'failed' (default 3)",
+    )
+    post_p.add_argument(
+        "--create", action="store_true",
+        help="initialize the queue file if it doesn't exist yet",
+    )
+    post_p.set_defaults(func=_cmd_post)
+
+    claim_p = subparsers.add_parser(
+        "claim",
+        help="Atomically claim a task as the named agent.",
+    )
+    claim_p.add_argument("db_path", help="path to the queue .db file")
+    claim_p.add_argument(
+        "--agent", required=True, help="agent_id for the claim",
+    )
+    claim_p.add_argument(
+        "--json", action="store_true",
+        help="emit {claimed: false} JSON when no claimable task instead of "
+        "exit-1 with stderr; useful for shell pipelines that branch on the "
+        "result. Exit code is still 1 to signal 'nothing claimed.'",
+    )
+    claim_p.set_defaults(func=_cmd_claim)
+
+    complete_p = subparsers.add_parser(
+        "complete",
+        help="Mark a claimed task done.",
+    )
+    complete_p.add_argument("db_path", help="path to the queue .db file")
+    complete_p.add_argument("--task", required=True, help="task_id")
+    complete_p.add_argument(
+        "--agent", required=True,
+        help="agent_id (must match the claiming agent to credit track-record correctly)",
+    )
+    complete_p.add_argument(
+        "--result", help="result as inline JSON (optional)",
+    )
+    complete_p.add_argument(
+        "--tokens", type=int, default=0,
+        help="token_count for this lifecycle step (default 0)",
+    )
+    complete_p.set_defaults(func=_cmd_complete)
+
+    fail_p = subparsers.add_parser(
+        "fail",
+        help="Mark a claimed task failed (forensic capture).",
+    )
+    fail_p.add_argument("db_path", help="path to the queue .db file")
+    fail_p.add_argument("--task", required=True, help="task_id")
+    fail_p.add_argument("--agent", required=True, help="agent_id")
+    fail_p.add_argument(
+        "--stack", help="stack trace string (inline)",
+    )
+    fail_p.add_argument(
+        "--stack-stdin", action="store_true",
+        help="read stack trace from stdin",
+    )
+    fail_p.add_argument(
+        "--prompt-state", help="prompt-state-at-failure as inline JSON",
+    )
+    fail_p.add_argument(
+        "--tokens", type=int, default=0,
+        help="token_count consumed before failure (default 0)",
+    )
+    fail_p.set_defaults(func=_cmd_fail)
+
+    decline_p = subparsers.add_parser(
+        "decline",
+        help="Return a task to the queue cooperatively (decline_n increments "
+        "but fail_n does not).",
+    )
+    decline_p.add_argument("db_path", help="path to the queue .db file")
+    decline_p.add_argument("--task", required=True, help="task_id")
+    decline_p.add_argument("--agent", required=True, help="agent_id")
+    decline_p.add_argument(
+        "--reason", required=True,
+        help="structured reason string (e.g. 'task_size_exceeds_budget')",
+    )
+    decline_p.set_defaults(func=_cmd_decline)
 
     inspect_p = subparsers.add_parser(
         "inspect",
