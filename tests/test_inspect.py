@@ -353,3 +353,79 @@ def test_healthz_reports_schema_version(client):
     body = r.json()
     assert body["ok"] is True
     assert body["schema_version"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Polish: responsive layout, empty-state UX, animation classes
+# ---------------------------------------------------------------------------
+
+
+def test_layout_has_responsive_viewport(client):
+    """Mobile-responsive layout — viewport meta is set."""
+    r = client.get("/")
+    body = r.text
+    assert 'name="viewport"' in body
+    assert "width=device-width" in body
+
+
+def test_layout_includes_htmx_swap_animation(client):
+    """CSS keyframe for fade-in on HTMX swaps is in the layout."""
+    r = client.get("/")
+    body = r.text
+    assert "@keyframes htmx-swap-fade" in body
+
+
+def test_tables_wrapped_in_horizontal_scroll(client):
+    """Tables are wrapped in a `.table-wrap` div so narrow viewports
+    can horizontally scroll instead of breaking layout."""
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-wrap")
+    _seed_event(conn, "t-wrap", "claim")
+    conn.close()
+    r = client.get("/")
+    assert 'class="table-wrap"' in r.text
+
+
+def test_dashboard_empty_state_is_helpful_not_terse(client):
+    """Empty-state messaging on the dashboard guides the contributor
+    toward populating a queue (e.g. via the demo script)."""
+    r = client.get("/")
+    body = r.text
+    # Helpful onboarding pointer present
+    assert "bounty_board.demo" in body or "Queue(" in body
+
+
+def test_dlq_empty_state_explains_the_dlq(client):
+    """DLQ empty state isn't just 'DLQ is empty' — it explains what
+    happens when failures land here so first-time viewers understand
+    the substrate."""
+    r = client.get("/dlq")
+    body = r.text
+    assert "DLQ is empty" in body
+    # Educational copy about the time-travel ledger
+    assert "task_events" in body or "forensic" in body
+
+
+def test_task_detail_empty_interventions_explains_the_substrate(client):
+    """Task detail with no interventions explains what interventions
+    are + how to post one — not just 'No interventions posted.'"""
+    conn = open_db(client.db_path)
+    _seed_task(conn, "t-detail-no-iv")
+    conn.close()
+    r = client.get("/tasks/t-detail-no-iv")
+    body = r.text
+    assert "No interventions posted" in body
+    # Pointer to the API surface for posting one
+    assert "/api/interventions" in body or "POST" in body
+
+
+def test_404_task_detail_renders_layout(client):
+    """A 404 task detail renders the full layout (nav, css, etc.),
+    not just a bare 'not found' line."""
+    r = client.get("/tasks/does-not-exist")
+    body = r.text
+    assert r.status_code == 200  # we render as 200 with an HTML body
+    assert "Dashboard" in body  # nav is present
+    assert "not found" in body
+    # Layout chrome present
+    assert "<!doctype html>" in body.lower()
