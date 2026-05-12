@@ -285,6 +285,16 @@ def _layout(title: str, body: str) -> str:
   .intervene-form .hint {{ font-size: 0.78rem; color: var(--muted);
                             margin-top: 0.4rem; }}
 
+  /* DLQ replay button */
+  .replay-btn {{ font-family: inherit; font-size: 0.78rem;
+    padding: 0.22rem 0.7rem; border: 1px solid var(--border);
+    background: var(--bg); color: var(--accent); border-radius: 4px;
+    cursor: pointer; font-weight: 500;
+  }}
+  .replay-btn:hover {{ background: var(--surface); border-color: var(--accent); }}
+  .replayed-row {{ opacity: 0.65; }}
+  .replayed-row em {{ font-style: italic; color: var(--muted); }}
+
   /* Narrow viewport tweaks */
   @media (max-width: 640px) {{
     body {{ margin: 1rem auto; padding: 0 0.7rem; }}
@@ -487,6 +497,35 @@ def create_app(db_path: str | Path) -> FastAPI:
         with _conn(db_path) as conn:
             return _dlq_tasks(conn, limit=limit)
 
+    @app.post("/api/dlq/replay/{task_id}")
+    def api_dlq_replay(task_id: str) -> dict[str, str]:
+        """Replay a DLQ entry as a fresh task with parent_id linkage.
+
+        Returns the new task_id. The original failed task stays in its
+        'failed' status as the audit trail anchor.
+        """
+        from bounty_board.dlq import DLQ
+        from bounty_board.queue import Queue
+
+        q = Queue(db_path)
+        try:
+            try:
+                new_id = DLQ(q).replay(task_id)
+            except ValueError as e:
+                # ValueError signals "task missing or not in DLQ status."
+                # Disambiguate for the HTTP status code.
+                row = q._conn.execute(
+                    "SELECT id FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(
+                        status_code=404, detail=f"task {task_id} not found"
+                    ) from e
+                raise HTTPException(status_code=400, detail=str(e)) from e
+        finally:
+            q.close()
+        return {"replayed_from": task_id, "new_task_id": new_id}
+
     @app.post("/api/interventions")
     def api_post_intervention(payload: dict[str, Any]) -> dict[str, int]:
         task_id = payload.get("task_id")
@@ -639,21 +678,66 @@ def create_app(db_path: str | Path) -> FastAPI:
             )
         else:
             rows = "".join(
-                f"<tr><td><a href='/tasks/{t['id']}'><code>{t['id'][:12]}</code></a></td>"
+                f"<tr id='dlq-row-{t['id']}'>"
+                f"<td><a href='/tasks/{t['id']}'><code>{t['id'][:12]}</code></a></td>"
                 f"<td><code>{t['task_type']}</code></td>"
                 f"<td>{_badge(t['status'])}</td>"
                 f"<td>{t['attempts']}</td>"
-                f"<td>{t['claimed_by'] or '—'}</td></tr>"
+                f"<td>{t['claimed_by'] or '—'}</td>"
+                f"<td>"
+                f'<button class="replay-btn" '
+                f'hx-post="/_partial/dlq/replay/{t["id"]}" '
+                f'hx-target="#dlq-row-{t["id"]}" hx-swap="outerHTML" '
+                f"hx-confirm=\"Replay this task? A fresh task will be queued "
+                f"with parent_id pointing back at this one.\">"
+                f"Replay</button>"
+                f"</td>"
+                f"</tr>"
                 for t in tasks
             )
             body = (
                 '<div class="table-wrap">'
                 "<table><thead><tr><th>id</th><th>type</th>"
                 "<th>status</th><th>attempts</th><th>last claimer</th>"
-                "</tr></thead>"
+                "<th></th></tr></thead>"
                 f"<tbody>{rows}</tbody></table></div>"
             )
         return _layout("DLQ", body)
+
+    @app.post("/_partial/dlq/replay/{task_id}", response_class=HTMLResponse)
+    def html_partial_dlq_replay(task_id: str) -> str:
+        """Form-friendly DLQ replay. Returns a single replacement <tr>
+        for HTMX to swap into the DLQ table, showing the original row
+        muted-out with the new task_id linked.
+        """
+        from bounty_board.dlq import DLQ
+        from bounty_board.queue import Queue
+
+        q = Queue(db_path)
+        try:
+            try:
+                new_id = DLQ(q).replay(task_id)
+            except ValueError as e:
+                row = q._conn.execute(
+                    "SELECT id FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(
+                        status_code=404, detail=f"task {task_id} not found"
+                    ) from e
+                raise HTTPException(status_code=400, detail=str(e)) from e
+        finally:
+            q.close()
+
+        return (
+            f"<tr id='dlq-row-{task_id}' class='replayed-row'>"
+            f"<td><a href='/tasks/{task_id}'><code>{task_id[:12]}</code></a></td>"
+            f"<td colspan='4'>"
+            f"<em>Replayed → <a href='/tasks/{new_id}'><code>{new_id[:12]}</code></a></em>"
+            f"</td>"
+            f"<td></td>"
+            f"</tr>"
+        )
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
