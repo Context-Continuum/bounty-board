@@ -27,6 +27,7 @@ The dashboard handles five surfaces from the V1 schema:
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -146,6 +147,36 @@ def _dlq_tasks(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]
         "ORDER BY completed_at DESC, created_at DESC LIMIT ?",
         (limit,),
     )
+    return _rows_to_dicts(cur, cur.fetchall())
+
+
+def _patches(
+    conn: sqlite3.Connection,
+    *,
+    payload_signature: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Patches read with optional signature + status filters."""
+    sql_parts = [
+        "SELECT id, payload_signature, transformer_json, status, "
+        "n_successes, n_failures, proposed_by_agent_id, proposed_at, "
+        "promoted_at FROM patches",
+    ]
+    wheres = []
+    params: list[Any] = []
+    if payload_signature is not None:
+        wheres.append("payload_signature = ?")
+        params.append(payload_signature)
+    if status is not None:
+        wheres.append("status = ?")
+        params.append(status)
+    if wheres:
+        sql_parts.append("WHERE " + " AND ".join(wheres))
+    sql_parts.append("ORDER BY status DESC, proposed_at DESC LIMIT ?")
+    params.append(limit)
+
+    cur = conn.execute(" ".join(sql_parts), tuple(params))
     return _rows_to_dicts(cur, cur.fetchall())
 
 
@@ -285,6 +316,17 @@ def _layout(title: str, body: str) -> str:
   .intervene-form .hint {{ font-size: 0.78rem; color: var(--muted);
                             margin-top: 0.4rem; }}
 
+  /* Patch badge variants — share base .badge styling */
+  .b-candidate   {{ background: #fef3c7; color: #92400e; }}
+  .b-canonical   {{ background: #d1fae5; color: #065f46; }}
+  .b-retired     {{ background: #e5e7eb; color: #4b5563; }}
+
+  /* Transformer preview — wrap long JSON */
+  .xform {{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 0.78rem; color: #374151;
+            max-width: 28rem; overflow-wrap: anywhere; word-break: break-word;
+            white-space: pre-wrap; }}
+
   /* DLQ replay button */
   .replay-btn {{ font-family: inherit; font-size: 0.78rem;
     padding: 0.22rem 0.7rem; border: 1px solid var(--border);
@@ -305,7 +347,7 @@ def _layout(title: str, body: str) -> str:
 </style>
 </head>
 <body>
-<nav><a href="/">Dashboard</a><a href="/dlq">DLQ</a></nav>
+<nav><a href="/">Dashboard</a><a href="/dlq">DLQ</a><a href="/patches">Patches</a></nav>
 <h1>{title}</h1>
 {body}
 </body>
@@ -738,6 +780,107 @@ def create_app(db_path: str | Path) -> FastAPI:
             f"<td></td>"
             f"</tr>"
         )
+
+    @app.get("/api/patches")
+    def api_patches(
+        payload_signature: str | None = Query(None),
+        status: str | None = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> list[dict[str, Any]]:
+        with _conn(db_path) as conn:
+            return _patches(
+                conn,
+                payload_signature=payload_signature,
+                status=status,
+                limit=limit,
+            )
+
+    @app.get("/patches", response_class=HTMLResponse)
+    def html_patches(
+        signature: str | None = Query(None),
+        status: str | None = Query(None),
+    ) -> str:
+        with _conn(db_path) as conn:
+            patches = _patches(
+                conn,
+                payload_signature=signature,
+                status=status,
+                limit=100,
+            )
+
+        # Inline filter form (GET to /patches with query params).
+        filter_form = (
+            '<form class="intervene-form" method="get" action="/patches">'
+            '<div class="row">'
+            '<label for="p-sig">Signature</label>'
+            f'<input id="p-sig" type="text" name="signature" '
+            f'value="{signature or ""}" placeholder="e.g. summarize_pr">'
+            '<label for="p-status">Status</label>'
+            '<select id="p-status" name="status">'
+            '<option value="">(any)</option>'
+            f'<option value="candidate"'
+            f'{" selected" if status == "candidate" else ""}>candidate</option>'
+            f'<option value="canonical"'
+            f'{" selected" if status == "canonical" else ""}>canonical</option>'
+            f'<option value="retired"'
+            f'{" selected" if status == "retired" else ""}>retired</option>'
+            '</select>'
+            '<button type="submit">Filter</button>'
+            '</div>'
+            '<div class="hint">'
+            "<strong>Candidate</strong> patches apply only to the proposing "
+            "agent's own replays. At <code>n_successes &ge; 3</code> they "
+            "auto-promote to <strong>canonical</strong> and apply to every "
+            "agent on this signature. <strong>Retired</strong> patches were "
+            "superseded or proven harmful and are no longer applied."
+            "</div>"
+            "</form>"
+        )
+
+        if not patches:
+            list_html = (
+                '<div class="empty"><strong>No patches yet.</strong> Patches '
+                "are proposed by agents during self-diagnostic replay "
+                "(Option D). When an agent fails and reads its own "
+                "trajectory, the diagnose surface emits a "
+                "<code>proposed_patch</code>; that becomes a candidate row "
+                "here. Successful replays auto-promote candidates to "
+                "canonical."
+                "</div>"
+            )
+        else:
+            rows = ""
+            for p in patches:
+                xform_pretty = p["transformer_json"]
+                try:
+                    xform_pretty = json.dumps(
+                        json.loads(p["transformer_json"]), indent=2,
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                rows += (
+                    "<tr>"
+                    f"<td>{p['id']}</td>"
+                    f"<td><code>{p['payload_signature']}</code></td>"
+                    f"<td>{_badge(p['status'])}</td>"
+                    f"<td><div class='xform'>{xform_pretty}</div></td>"
+                    f"<td>{p['n_successes']}</td>"
+                    f"<td>{p['n_failures']}</td>"
+                    f"<td>{p['proposed_by_agent_id']}</td>"
+                    f"</tr>"
+                )
+            list_html = (
+                '<div class="table-wrap">'
+                "<table><thead><tr>"
+                "<th>id</th><th>signature</th><th>status</th>"
+                "<th>transformer</th><th>successes</th><th>failures</th>"
+                "<th>proposed by</th>"
+                "</tr></thead>"
+                f"<tbody>{rows}</tbody></table></div>"
+            )
+
+        body = f"{filter_form}<h2>Patches</h2>{list_html}"
+        return _layout("Patches", body)
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
